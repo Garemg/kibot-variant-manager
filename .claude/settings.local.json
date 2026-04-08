@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import py_compile; py_compile.compile\\('kibot_gui.py', doraise=True\\); print\\('Sintaxis OK'\\)\")",
+      "Bash(python -c ':*)",
+      "Bash(wsl bash -lc 'python3 -c \":*)",
+      "Bash(wsl bash:*)",
+      "Bash(rm -f strip_test.py load_test.py diff_test.py load_test2.py bsearch*.py find_all_failures.py)",
+      "Bash(ls *.py)",
+      "Bash(python3 -c \"import sys; print\\(sys.getrecursionlimit\\(\\)\\)\")",
+      "Bash(python -c \"import sys; print\\(sys.getrecursionlimit\\(\\)\\)\")"
+    ]
+  }
+}

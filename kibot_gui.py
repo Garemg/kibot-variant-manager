@@ -15,6 +15,7 @@ except ImportError:
     HAS_DND = False
 
 IS_WINDOWS = sys.platform == 'win32'
+sys.setrecursionlimit(10000)
 CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".kibot_manager.json")
 POPEN_FLAGS = {}
 if IS_WINDOWS:
@@ -214,6 +215,10 @@ def convert_pcb_10to9(root, log):
         for name, idx in sorted(nets.items(), key=lambda x: x[1]):
             root.children.insert(ins, SNode('list', name='net', children=[SNode('atom',value=str(idx)), SNode('string',value=name)])); ins += 1
     _walk_pcb(root, nets, log)
+    # ── remove v10-only root-level elements ──
+    for tag in ('group', 'generated', 'embedded_fonts', 'point'):
+        n = remove_all(root, tag)
+        if n: log.append(f"Removed {n} root {tag}(s)")
 
 def _collect_nets(root):
     ns = set()
@@ -231,6 +236,7 @@ def _collect_nets(root):
 
 def _walk_pcb(node, nm, log):
     if not node or node.type != 'list': return
+    # ── net id remapping for segments/arcs/vias ──
     if node.name in ('segment','arc','via'):
         nc = find_child(node,'net')
         if nc and nc.children:
@@ -238,6 +244,7 @@ def _walk_pcb(node, nm, log):
             if v.type=='string' or (v.type=='atom' and not v.value.lstrip('-').isdigit()):
                 nid = nm.get(v.value)
                 if nid is not None: nc.children = [SNode('atom',value=str(nid))]
+    # ── net id remapping for pads ──
     if node.name == 'pad':
         nc = find_child(node,'net')
         if nc and nc.children:
@@ -245,6 +252,7 @@ def _walk_pcb(node, nm, log):
             if v.type=='string' or (v.type=='atom' and not v.value.lstrip('-').isdigit()):
                 nid = nm.get(v.value)
                 if nid is not None: nc.children = [SNode('atom',value=str(nid)), SNode('string',value=v.value)]
+    # ── zones ──
     if node.name == 'zone':
         nc = find_child(node,'net')
         if nc and nc.children:
@@ -256,15 +264,38 @@ def _walk_pcb(node, nm, log):
                     if not find_child(node,'net_name'):
                         idx = next((i for i,c in enumerate(node.children) if c is nc),0)+1
                         node.children.insert(idx, SNode('list',name='net_name',children=[SNode('string',value=v.value)]))
+        remove_all(node, 'placement')
         fl = find_child(node,'fill')
         if fl: remove_all(fl,'island_removal_mode')
         if not find_child(node,'filled_areas_thickness'):
             fi = next((i for i,c in enumerate(node.children) if c.type=='list' and c.name=='fill'),-1)
             node.children.insert(fi+1 if fi>=0 else len(node.children), SNode('list',name='filled_areas_thickness',children=[SNode('atom',value='no')]))
+    # ── vias: remove v10-only fields ──
     if node.name == 'via':
-        for a in ('capping','covering','plugging','filling'): remove_all(node, a)
+        for a in ('capping','covering','plugging','filling','teardrops'): remove_all(node, a)
+    # ── pads/segments/arcs: remove inline teardrops ──
+    if node.name in ('pad','segment','arc'):
+        remove_all(node, 'teardrops')
+    # ── filled_polygon: remove v10 island flag ──
+    if node.name == 'filled_polygon':
+        remove_all(node, 'island')
+    # ── property: move hide inside effects, remove uuid/show_name/do_not_autoplace ──
+    if node.name == 'property' and node.children:
+        remove_all(node, 'show_name'); remove_all(node, 'do_not_autoplace'); remove_all(node, 'uuid')
+        idx = next((i for i,c in enumerate(node.children) if c.type=='list' and c.name=='hide'), -1)
+        if idx >= 0:
+            hv = node.children[idx].children[0].value if node.children[idx].children else 'yes'
+            node.children.pop(idx)
+            if hv == 'yes':
+                eff = find_child(node, 'effects')
+                if eff: eff.children.append(SNode('list', name='hide', children=[SNode('atom', value='yes')]))
+    # ── footprints ──
     if node.name == 'footprint':
-        for a in ('units','duplicate_pad_numbers_are_jumpers','point','component_classes'): remove_all(node, a)
+        for a in ('units','duplicate_pad_numbers_are_jumpers','point','component_classes',
+                   'embedded_fonts','sheetname','sheetfile'): remove_all(node, a)
+        node.children = [c for c in node.children if not(c.type=='list' and c.name=='property'
+                         and c.children and c.children[0].type in ('atom','string')
+                         and c.children[0].value in ('exclude_from_bom','exclude_from_pos_files','ki_fp_filters'))]
         for prop in find_all(node,'property'):
             if not prop.children: continue
             pn = prop.children[0].value
@@ -330,8 +361,10 @@ def convert_file_10to9(filepath, dest, log_cb):
 
 def wsl_path(win_path):
     if not IS_WINDOWS: return win_path
-    try: return subprocess.check_output(['wsl','wslpath','-u',win_path], text=True, encoding='utf-8', **POPEN_FLAGS).strip()
-    except: return win_path
+    p = os.path.abspath(win_path).replace('\\', '/')
+    if len(p) >= 2 and p[1] == ':':
+        p = '/mnt/' + p[0].lower() + p[2:]
+    return p
 
 def check_requirements():
     results = []
@@ -821,7 +854,7 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
     # ── CONVERSION ──
 
     def _auto_convert(self):
-        yaml_name = Path(self.yaml_path).stem
+        yaml_name = Path(self.yaml_path).stem.replace('.', '_')
         backup_dir = os.path.join(self.project_dir, f"{yaml_name}_v10")
         pn = get_project_name(self.project_dir) or "proyecto"
         os.makedirs(backup_dir, exist_ok=True)
@@ -860,7 +893,7 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         pn = get_project_name(self.project_dir) or "proyecto"
 
-        yaml_name = Path(self.yaml_path).stem
+        yaml_name = Path(self.yaml_path).stem.replace('.', '_')
         backup_dir = os.path.join(self.project_dir, f"{yaml_name}_v10")
 
         info = tk.LabelFrame(body, text="  Informacion  ", bg=XP['panel_bg'], fg=XP['info'],
