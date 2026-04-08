@@ -793,12 +793,24 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
                 self.kicad10_detected = True; self.kicad10_files.append(fp)
         if self.kicad10_detected:
             self._set_step('version','error'); self._set_step('ready','pending')
-            self._log("\n!! KiCad 10 detectado. KiBot no lo soporta.", 'err')
-            self._log("   Pulse 'Convertir' en la barra lateral.\n", 'warn')
-            self.convert_btn.pack(fill='x', padx=4, pady=(4,8))
-            for w in self.btn_frame.winfo_children():
-                if isinstance(w, XPButton): w.set_state(False)
-            self.status_var.set("KiCad 10 detectado - Conversion necesaria")
+            self._log("\n!! KiCad 10 detectado. Convirtiendo automaticamente...", 'warn')
+            self.status_var.set("Convirtiendo KiCad 10 -> 9...")
+            self.update_idletasks()
+            ok = self._auto_convert()
+            if ok == len(self.kicad10_files):
+                self.kicad10_detected = False; self.kicad10_files = []
+                self.detected_version = "KiCad 9 (convertido)"
+                self._set_step('version','ok'); self._set_step('ready','ok')
+                self.convert_btn.pack_forget()
+                for w in self.btn_frame.winfo_children():
+                    if isinstance(w, XPButton): w.set_state(True)
+                self.status_var.set(f"Convertido a v9 | {len(self.variants)} variantes")
+            else:
+                self._log(f"!! Algunos archivos fallaron. Use 'Convertir' manual.\n", 'err')
+                self.convert_btn.pack(fill='x', padx=4, pady=(4,8))
+                for w in self.btn_frame.winfo_children():
+                    if isinstance(w, XPButton): w.set_state(False)
+                self.status_var.set("Conversion parcial - revision necesaria")
         else:
             self._set_step('version','ok'); self._set_step('ready','ok')
             self.convert_btn.pack_forget()
@@ -807,6 +819,31 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
                 if isinstance(w, XPButton): w.set_state(True)
 
     # ── CONVERSION ──
+
+    def _auto_convert(self):
+        yaml_name = Path(self.yaml_path).stem
+        backup_dir = os.path.join(self.project_dir, f"{yaml_name}_v10")
+        pn = get_project_name(self.project_dir) or "proyecto"
+        os.makedirs(backup_dir, exist_ok=True)
+        self._log(f"  Backup v10: {yaml_name}_v10/", 'dim')
+        total = len(self.kicad10_files)
+        ok = 0
+        for fp in list(self.kicad10_files):
+            bn = os.path.basename(fp)
+            self._log(f"  {bn}...", 'dim')
+            try:
+                bak = os.path.join(backup_dir, bn)
+                shutil.copy2(fp, bak)
+                if convert_file_10to9(bak, self.project_dir, lambda m: self._log(m, 'dim')):
+                    ok += 1
+                    self._log(f"    OK", 'ok')
+            except Exception as e:
+                self._log(f"    ERROR: {e}", 'err')
+        if not any(f.endswith('.kicad_pro') for f in os.listdir(self.project_dir)):
+            pp = generate_kicad_pro(pn, self.project_dir)
+            self._log(f"  Generado: {os.path.basename(pp)}", 'dim')
+        self._log(f"Conversion: {ok}/{total} archivos\n", 'ok' if ok == total else 'warn')
+        return ok
 
     def _convert_dialog(self):
         win = tk.Toplevel(self); win.title("Convertir KiCad 10 -> 9")
