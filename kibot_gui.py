@@ -5,7 +5,7 @@ KiBot Variant Manager v4 — Windows XP style, red corporate theme
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
-import yaml, subprocess, threading, os, re, shutil, glob, json, sys
+import yaml, subprocess, threading, os, re, shutil, glob, json, sys, datetime
 from pathlib import Path
 
 try:
@@ -460,6 +460,10 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.kicad10_files = []
         self.current_proc = None
         self.requirements_ok = False
+        self.execution_history = []
+        self.variant_buttons = {}
+        self.detected_version = ""
+        self._yaml_data = {}
 
         self._build_ui()
         self._check_startup()
@@ -492,6 +496,14 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.btn_cancel = XPButton(tbtn_frame, text="Cancelar", command=self._cancel_process, width=80, height=26)
         self.btn_cancel.pack(side='left', padx=2)
         self.btn_cancel.set_state(False)
+
+        tk.Frame(tbtn_frame, bg=XP['btn_shadow'], width=1).pack(side='left', fill='y', padx=4)
+        self.btn_open_output = XPButton(tbtn_frame, text="Abrir salida", command=self._open_output_folder, width=95, height=26)
+        self.btn_open_output.pack(side='left', padx=2)
+        self.btn_open_output.set_state(False)
+        self.btn_export_log = XPButton(tbtn_frame, text="Exportar log", command=self._export_log, width=90, height=26)
+        self.btn_export_log.pack(side='left', padx=2)
+        self.btn_export_log.set_state(False)
 
         tk.Frame(self, bg=XP['btn_shadow'], height=1).pack(fill='x')
 
@@ -528,9 +540,26 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
         right = tk.Frame(self.main_frame, bg=XP['bg'])
         right.pack(side='left', fill='both', expand=True, padx=4, pady=4)
 
+        # ── PROJECT CARD ──
+        self.project_card = tk.LabelFrame(right, text="  Proyecto  ", bg=XP['panel_bg'],
+                                           fg=XP['info'], font=("Tahoma", 9, "bold"),
+                                           relief='groove', bd=2, padx=8, pady=4)
+        self.card_vars = {}
+        for _key, _lbl in [('nombre', 'PCB'), ('variantes', 'Variantes'), ('version', 'Version KiCad'),
+                             ('fecha', 'Fecha YAML'), ('outputs', 'Outputs'), ('ruta', 'Ruta')]:
+            _row = tk.Frame(self.project_card, bg=XP['panel_bg'])
+            _row.pack(fill='x', pady=0)
+            tk.Label(_row, text=f"{_lbl}:", bg=XP['panel_bg'], fg=XP['text2'],
+                     font=("Tahoma", 8, "bold"), width=12, anchor='w').pack(side='left')
+            _v = tk.StringVar()
+            self.card_vars[_key] = _v
+            tk.Label(_row, textvariable=_v, bg=XP['panel_bg'], fg=XP['text'],
+                     font=("Tahoma", 8), anchor='w').pack(side='left', fill='x', expand=True)
+
         # ── STATUS BOX (groupbox style) ──
-        status_outer = tk.Frame(right, bg=XP['bg'])
-        status_outer.pack(fill='x', pady=(0,4))
+        self.status_outer = tk.Frame(right, bg=XP['bg'])
+        self.status_outer.pack(fill='x', pady=(0,4))
+        status_outer = self.status_outer
 
         # groupbox border
         gb = tk.LabelFrame(status_outer, text="  Estado  ", bg=XP['panel_bg'],
@@ -561,6 +590,17 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         self.progress = XPProgress(prog_frame, width=600, height=22)
         self.progress.pack(fill='x')
+
+        # ── HISTORIAL ──
+        hist_gb = tk.LabelFrame(right, text="  Historial de ejecuciones  ", bg=XP['panel_bg'],
+                                 fg=XP['info'], font=("Tahoma", 9, "bold"),
+                                 relief='groove', bd=2, padx=4, pady=4)
+        hist_gb.pack(fill='x', pady=(0,4))
+        self.hist_list = tk.Listbox(hist_gb, bg=XP['white'], fg=XP['text'],
+                                     font=("Lucida Console", 8) if IS_WINDOWS else ("Consolas", 8),
+                                     height=4, relief='sunken', bd=2,
+                                     selectbackground=XP['selection'], selectforeground='white')
+        self.hist_list.pack(fill='x')
 
         # ── TERMINAL ──
         term_gb = tk.LabelFrame(right, text="  Terminal  ", bg=XP['bg'],
@@ -677,11 +717,16 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
     def _clear_all(self):
         self.variants = []; self.yaml_path = None; self.project_dir = None
         self.kicad10_detected = False; self.kicad10_files = []
+        self.variant_buttons = {}; self._yaml_data = {}
         for w in self.btn_frame.winfo_children(): w.destroy()
         self.convert_btn.pack_forget()
         self.log.delete('1.0', 'end')
+        self.hist_list.delete(0, 'end')
+        self.project_card.pack_forget()
         for s in self.step_labels: self._set_step(s, 'pending')
         self.progress.set_value(0)
+        self.btn_open_output.set_state(False)
+        self.btn_export_log.set_state(False)
         self.main_frame.pack_forget()
         self.drop_frame.pack(fill='both', expand=True)
         self.status_var.set("Listo")
@@ -708,6 +753,7 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
             self._set_step('yaml','error')
             messagebox.showerror("YAML invalido", "\n".join(errs)); return
         self.variants = data['variants']
+        self._yaml_data = data
         self.drop_frame.pack_forget(); self.main_frame.pack(fill='both', expand=True)
         self.log.delete('1.0','end')
         self._log(f"YAML: {os.path.basename(path)}", 'info')
@@ -716,25 +762,31 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self._log("", None)
         self._set_step('yaml','ok')
         self.status_var.set(f"{os.path.basename(self.project_dir)} | {len(self.variants)} variantes")
+        self.btn_open_output.set_state(True)
+        self.btn_export_log.set_state(True)
+        self.variant_buttons = {}
         for w in self.btn_frame.winfo_children(): w.destroy()
         for var in self.variants:
             nm = var.get('name','???'); cm = var.get('comment','')
             btn = XPButton(self.btn_frame, text=nm, command=lambda v=var: self._run_variant(v),
                            width=200, height=26)
             btn.pack(fill='x', pady=2)
+            self.variant_buttons[nm] = btn
             if cm:
                 tk.Label(self.btn_frame, text=f"  {cm}", bg=XP['panel_bg'], fg=XP['text3'],
                          font=("Tahoma", 7), anchor='w').pack(fill='x')
         self._check_versions()
+        self._update_project_card()
 
     def _check_versions(self):
-        self.kicad10_detected = False; self.kicad10_files = []
+        self.kicad10_detected = False; self.kicad10_files = []; self.detected_version = ""
         if not self.project_dir: return
         files = glob.glob(os.path.join(self.project_dir,'*.kicad_sch')) + \
                 glob.glob(os.path.join(self.project_dir,'*.kicad_pcb'))
         self._log("Comprobando versiones...", 'dim')
         for fp in files:
             ver, label = detect_kicad_version(fp)
+            self.detected_version = label
             tag = 'ok' if label != "KiCad 10" else 'err'
             self._log(f"  {os.path.basename(fp)}: {label}", tag)
             if label == "KiCad 10":
@@ -771,15 +823,18 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         pn = get_project_name(self.project_dir) or "proyecto"
 
+        yaml_name = Path(self.yaml_path).stem
+        backup_dir = os.path.join(self.project_dir, f"{yaml_name}_v10")
+
         info = tk.LabelFrame(body, text="  Informacion  ", bg=XP['panel_bg'], fg=XP['info'],
                               font=("Tahoma", 8, "bold"), relief='groove', bd=2)
         info.pack(fill='x', pady=(0,6))
         tk.Label(info, text=f"Proyecto: {pn}", bg=XP['panel_bg'], font=("Tahoma", 9, "bold"),
                  anchor='w').pack(fill='x', padx=6, pady=2)
-        tk.Label(info, text=f"Los archivos v10 originales NO se modifican.",
-                 bg=XP['panel_bg'], fg=XP['ok'], font=("Tahoma", 8), anchor='w').pack(fill='x', padx=6)
-        tk.Label(info, text=f"Se creara: {pn}_v9.0/  (convertidos + .kicad_pro)",
-                 bg=XP['panel_bg'], fg=XP['info'], font=("Tahoma", 8), anchor='w').pack(fill='x', padx=6, pady=(0,4))
+        tk.Label(info, text=f"Originales v10 se moveran a:  {yaml_name}_v10/",
+                 bg=XP['panel_bg'], fg=XP['warn'], font=("Tahoma", 8), anchor='w').pack(fill='x', padx=6)
+        tk.Label(info, text=f"Convertidos v9 quedaran en la raiz junto al YAML",
+                 bg=XP['panel_bg'], fg=XP['ok'], font=("Tahoma", 8), anchor='w').pack(fill='x', padx=6, pady=(0,4))
 
         # file list
         flf = tk.LabelFrame(body, text="  Archivos  ", bg=XP['panel_bg'], fg=XP['info'],
@@ -801,27 +856,36 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
         clog.pack(fill='both', expand=True, pady=(0,4))
 
         def do_convert():
-            v9d = os.path.join(self.project_dir, f"{pn}_v9.0")
-            os.makedirs(v9d, exist_ok=True)
+            os.makedirs(backup_dir, exist_ok=True)
             def lf(m): clog.insert('end', m+'\n'); clog.see('end'); win.update_idletasks()
-            lf(f"Output: {v9d}\n"); ok = 0
+            lf(f"Backup v10: {backup_dir}")
+            lf(f"Convertidos v9: {self.project_dir}\n")
+            ok = 0
             for fp in list(self.kicad10_files):
-                lf(f"-- {os.path.basename(fp)} --")
+                bn = os.path.basename(fp)
+                lf(f"-- {bn} --")
                 try:
-                    if convert_file_10to9(fp, v9d, lf): ok += 1
-                except Exception as e: lf(f"  ERROR: {e}")
-            pp = generate_kicad_pro(pn, v9d)
-            lf(f"\nGenerado: {os.path.basename(pp)}")
+                    bak = os.path.join(backup_dir, bn)
+                    shutil.copy2(fp, bak)
+                    lf(f"  Backup: {bn} -> {yaml_name}_v10/")
+                    if convert_file_10to9(bak, self.project_dir, lf):
+                        ok += 1
+                except Exception as e:
+                    lf(f"  ERROR: {e}")
+            if not any(f.endswith('.kicad_pro') for f in os.listdir(self.project_dir)):
+                pp = generate_kicad_pro(pn, self.project_dir)
+                lf(f"\nGenerado: {os.path.basename(pp)}")
             lf(f"\nResultado: {ok}/{len(self.kicad10_files)} convertidos")
             self._log(f"\nConversion OK: {ok}/{len(self.kicad10_files)}", 'ok')
-            self._log(f"  {v9d}", 'info')
-            self.project_dir = v9d
+            self._log(f"  Backup v10: {backup_dir}", 'info')
+            self._log(f"  Convertidos en: {self.project_dir}", 'info')
             self.kicad10_detected = False; self.kicad10_files = []
             self.convert_btn.pack_forget()
             self._set_step('version','ok'); self._set_step('ready','ok')
             for w in self.btn_frame.winfo_children():
                 if isinstance(w, XPButton): w.set_state(True)
             self.status_var.set(f"Proyecto v9 listo | {len(self.variants)} variantes")
+            self._update_project_card()
 
         XPButton(body, text="Convertir ahora", command=do_convert, width=160, height=30).pack(pady=(4,0))
 
@@ -862,6 +926,7 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
                     self.after(0, self.progress.set_value, 1.0)
                     self.after(0, self._log, "Finalizado OK", 'ok')
                     self.after(0, self.status_var.set, f"{name} completado")
+                    self.after(0, self._mark_variant, name, 'ok')
                 elif rc in (-9, 137):
                     self.after(0, self._log, "Cancelado.", 'warn')
                     self.after(0, self._set_step, 'ready', 'ok')
@@ -870,6 +935,7 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
                     self.after(0, self._set_step, 'ready', 'error')
                     self.after(0, self._log, f"Error (exit {rc})", 'err')
                     self.after(0, self.status_var.set, f"{name} fallo")
+                    self.after(0, self._mark_variant, name, 'err')
             except FileNotFoundError:
                 self.after(0, self._log, "ERROR: comando no encontrado", 'err')
             except Exception as e:
@@ -883,6 +949,68 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
         if self.current_proc:
             try: self.current_proc.kill(); self._log("Cancelando...", 'warn')
             except: pass
+
+    # ── NEW FEATURES ──
+
+    def _update_project_card(self):
+        path = self.yaml_path
+        data = self._yaml_data
+        nombre = get_project_name(self.project_dir) or Path(path).stem
+        fecha = datetime.datetime.fromtimestamp(os.path.getmtime(path)).strftime("%d/%m/%Y %H:%M")
+        outputs = data.get('outputs', [])
+        out_types = []
+        for o in outputs:
+            if isinstance(o, dict):
+                ot = o.get('type', o.get('name', '?'))
+                if ot and ot not in out_types:
+                    out_types.append(ot)
+        out_str = ", ".join(out_types) if out_types else "No especificados"
+        ruta = self.project_dir
+        if len(ruta) > 55:
+            ruta = "..." + ruta[-52:]
+        self.card_vars['nombre'].set(nombre)
+        self.card_vars['variantes'].set(str(len(self.variants)))
+        self.card_vars['version'].set(self.detected_version or "Desconocida")
+        self.card_vars['fecha'].set(fecha)
+        self.card_vars['outputs'].set(out_str)
+        self.card_vars['ruta'].set(ruta)
+        self.project_card.pack(fill='x', pady=(0,4), before=self.status_outer)
+
+    def _mark_variant(self, name, state):
+        btn = self.variant_buttons.get(name)
+        if btn:
+            color = '#90EE90' if state == 'ok' else '#FF9999'
+            btn.config(bg=color, activebackground=color)
+            btn.bind('<Leave>', lambda _e, c=color: btn.config(bg=c))
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        result = "  OK  " if state == 'ok' else "  FAIL"
+        entry = f"[{ts}]  {name:<20}  {result}"
+        self.hist_list.insert('end', entry)
+        idx = self.hist_list.size() - 1
+        self.hist_list.itemconfig(idx, fg=XP['ok'] if state == 'ok' else XP['err'])
+        self.hist_list.see(idx)
+
+    def _open_output_folder(self):
+        folder = self.project_dir
+        if folder and os.path.isdir(folder):
+            if IS_WINDOWS:
+                os.startfile(folder)
+            else:
+                subprocess.Popen(['xdg-open', folder])
+        else:
+            messagebox.showinfo("Carpeta", "Ruta de salida no disponible")
+
+    def _export_log(self):
+        path = filedialog.asksaveasfilename(
+            title="Exportar log",
+            defaultextension=".txt",
+            filetypes=[("Texto", "*.txt"), ("Todos", "*.*")]
+        )
+        if path:
+            content = self.log.get('1.0', 'end')
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            self.status_var.set(f"Log exportado: {os.path.basename(path)}")
 
 if __name__ == '__main__':
     app = KiBotGUI()
