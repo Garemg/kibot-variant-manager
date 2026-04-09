@@ -10,7 +10,12 @@
       "Bash(python3 -c \"import sys; print\\(sys.getrecursionlimit\\(\\)\\)\")",
       "Bash(python -c \"import sys; print\\(sys.getrecursionlimit\\(\\)\\)\")",
       "Bash(pyinstaller --onefile --windowed --name \"KiBot Variant Manager\" --add-data \"assets;assets\" --collect-all tkinterdnd2 --hidden-import PIL kibot_gui.py)",
-      "Bash(ie4uinit.exe -show)"
+      "Bash(ie4uinit.exe -show)",
+      "Bash(rm -rf __pycache__)",
+      "Bash(python -c \"from kibot_gui import KiBotGUI; print\\('Import OK'\\)\")",
+      "Bash(python -m py_compile kibot_gui.py)",
+      "Bash(pyinstaller --onefile --windowed --name \"KiBot Variant Manager\" --icon \"assets/icono.ico\" --add-data \"assets;assets\" --collect-all tkinterdnd2 --hidden-import PIL --hidden-import openpyxl kibot_gui.py)",
+      "Bash(wc -l \"/c/Users/Emilio/OneDrive - Grupo Barroso Pidal/Archivos de Juan Raúl Santana Moreno - PCBs/Kicad_Proyectos/0300096_260317_Modulo_RF_HP/Documentación_Default/0300096_260317_Modulo_RF_HP/Position/\"*)"
     ]
   }
 }

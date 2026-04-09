@@ -645,6 +645,13 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.btn_frame = tk.Frame(sidebar, bg=XP['panel_bg'])
         self.btn_frame.pack(fill='both', expand=True, padx=4, pady=4)
 
+        # bottom sidebar buttons
+        sidebar_bottom = tk.Frame(sidebar, bg=XP['panel_bg'])
+        sidebar_bottom.pack(side='bottom', fill='x', padx=4, pady=4)
+        self.btn_run_all = XPButton(sidebar_bottom, text="Ejecutar todas", command=self._run_all_variants, width=200, height=28)
+        self.btn_run_all.pack(fill='x', pady=(0,2))
+        self.btn_run_all.set_state(False)
+
         self.convert_btn = XPButton(sidebar, text="!! Convertir KiCad 10->9",
                                      command=self._convert_dialog, width=200, height=30)
 
@@ -713,6 +720,8 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
                                      height=4, relief='sunken', bd=2,
                                      selectbackground=XP['selection'], selectforeground='white')
         self.hist_list.pack(fill='x')
+        self.hist_list.bind('<Double-Button-1>', self._on_hist_dblclick)
+        self._hist_variants = []
 
         # ── TERMINAL ──
         term_gb = tk.LabelFrame(right, text="  Terminal  ", bg=XP['bg'],
@@ -837,11 +846,13 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.convert_btn.pack_forget()
         self.log.delete('1.0', 'end')
         self.hist_list.delete(0, 'end')
+        self._hist_variants = []
         self.project_card.pack_forget()
         for s in self.step_labels: self._set_step(s, 'pending')
         self.progress.set_value(0)
         self.btn_open_output.set_state(False)
         self.btn_export_log.set_state(False)
+        self.btn_run_all.set_state(False)
         self.main_frame.pack_forget()
         self.drop_frame.pack(fill='both', expand=True)
         self.status_var.set("Listo")
@@ -891,6 +902,7 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
                 tk.Label(self.btn_frame, text=f"  {cm}", bg=XP['panel_bg'], fg=XP['text3'],
                          font=("Tahoma", 7), anchor='w').pack(fill='x')
         self._check_versions()
+        self._validate_yaml_refs()
         self._update_project_card()
 
     def _check_versions(self):
@@ -910,28 +922,69 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
             self._set_step('version','error'); self._set_step('ready','pending')
             self._log("\n!! KiCad 10 detectado. Convirtiendo automaticamente...", 'warn')
             self.status_var.set("Convirtiendo KiCad 10 -> 9...")
-            self.update_idletasks()
-            ok = self._auto_convert()
-            if ok == len(self.kicad10_files):
-                self.kicad10_detected = False; self.kicad10_files = []
-                self.detected_version = "KiCad 9 (convertido)"
-                self._set_step('version','ok'); self._set_step('ready','ok')
-                self.convert_btn.pack_forget()
-                for w in self.btn_frame.winfo_children():
-                    if isinstance(w, XPButton): w.set_state(True)
-                self.status_var.set(f"Convertido a v9 | {len(self.variants)} variantes")
-            else:
-                self._log(f"!! Algunos archivos fallaron. Use 'Convertir' manual.\n", 'err')
-                self.convert_btn.pack(fill='x', padx=4, pady=(4,8))
-                for w in self.btn_frame.winfo_children():
-                    if isinstance(w, XPButton): w.set_state(False)
-                self.status_var.set("Conversion parcial - revision necesaria")
+            self.btn_load.set_state(False)
+            total = len(self.kicad10_files)
+            def convert_thread():
+                ok = self._auto_convert()
+                self.after(0, self._on_convert_done, ok, total)
+            threading.Thread(target=convert_thread, daemon=True).start()
+            return
         else:
             self._set_step('version','ok'); self._set_step('ready','ok')
             self.convert_btn.pack_forget()
             self._log("Version compatible.\n", 'ok')
             for w in self.btn_frame.winfo_children():
                 if isinstance(w, XPButton): w.set_state(True)
+            self.btn_run_all.set_state(True)
+
+    def _on_convert_done(self, ok, total):
+        self.btn_load.set_state(True)
+        if ok == total:
+            self.kicad10_detected = False; self.kicad10_files = []
+            self.detected_version = "KiCad 9 (convertido)"
+            self._set_step('version','ok'); self._set_step('ready','ok')
+            self.convert_btn.pack_forget()
+            for w in self.btn_frame.winfo_children():
+                if isinstance(w, XPButton): w.set_state(True)
+            self.btn_run_all.set_state(True)
+            self.status_var.set(f"Convertido a v9 | {len(self.variants)} variantes")
+        else:
+            self._log(f"!! Algunos archivos fallaron. Use 'Convertir' manual.\n", 'err')
+            self.convert_btn.pack(fill='x', padx=4, pady=(4,8))
+            for w in self.btn_frame.winfo_children():
+                if isinstance(w, XPButton): w.set_state(False)
+            self.status_var.set("Conversion parcial - revision necesaria")
+
+    def _validate_yaml_refs(self):
+        """Check that files referenced in the YAML (logo, etc.) exist in the project dir."""
+        data = self._yaml_data
+        refs_found = []
+
+        def _scan(obj):
+            if isinstance(obj, str):
+                # Detect file references: strings ending with image/file extensions
+                if re.match(r'^[\w\-. ]+\.(png|jpg|svg|step|stp|wrl|kicad_dbl)$', obj, re.IGNORECASE):
+                    refs_found.append(obj)
+            elif isinstance(obj, dict):
+                for v in obj.values(): _scan(v)
+            elif isinstance(obj, list):
+                for v in obj: _scan(v)
+
+        _scan(data)
+        if not refs_found:
+            return
+        self._log("Comprobando archivos referenciados...", 'dim')
+        all_ok = True
+        for ref in sorted(set(refs_found)):
+            fp = os.path.join(self.project_dir, ref)
+            if os.path.isfile(fp):
+                self._log(f"  {ref}: encontrado", 'ok')
+            else:
+                self._log(f"  {ref}: NO encontrado", 'warn')
+                all_ok = False
+        if not all_ok:
+            self._log("  Algunos archivos referenciados no estan en la carpeta del proyecto.", 'warn')
+            self._log("  KiBot podria generar warnings o errores.\n", 'warn')
 
     # ── CONVERSION ──
 
@@ -1036,6 +1089,7 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
             self._set_step('version','ok'); self._set_step('ready','ok')
             for w in self.btn_frame.winfo_children():
                 if isinstance(w, XPButton): w.set_state(True)
+            self.btn_run_all.set_state(True)
             self.status_var.set(f"Proyecto v9 listo | {len(self.variants)} variantes")
             self._update_project_card()
 
@@ -1049,15 +1103,30 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
     # ── RUN VARIANT ──
 
-    def _run_variant(self, var):
+    def _run_variant(self, var, on_done=None):
         if self.kicad10_detected:
             messagebox.showwarning("KiCad 10", "Primero convierta los archivos."); return
+        # Validate KiCad files exist
+        schs = glob.glob(os.path.join(self.project_dir, '*.kicad_sch'))
+        pcbs = glob.glob(os.path.join(self.project_dir, '*.kicad_pcb'))
+        if not schs or not pcbs:
+            missing = []
+            if not schs: missing.append('.kicad_sch')
+            if not pcbs: missing.append('.kicad_pcb')
+            messagebox.showerror("Archivos faltantes",
+                f"No se encontraron archivos {' ni '.join(missing)}\n"
+                f"en {self.project_dir}")
+            if on_done: self.after(0, on_done, var.get('name',''), False)
+            return
         name = var.get('name','')
         self._log(f"\n{'='*50}", 'dim')
         self._log(f"Ejecutando: {name}", 'info')
         self._set_step('ready','running'); self.progress.set_value(0.1)
         self.btn_cancel.set_state(True)
         self.status_var.set(f"Ejecutando: {name}...")
+        # Count expected outputs for real progress
+        self._output_total = len(self._yaml_data.get('outputs', []))
+        self._output_count = 0
 
         if IS_WINDOWS:
             wy = wsl_path(self.yaml_path); wd = wsl_path(self.project_dir)
@@ -1068,18 +1137,22 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self._log(f"$ {' '.join(cmd)}", 'dim')
 
         def run():
+            success = False
             try:
                 self.current_proc = subprocess.Popen(cmd, cwd=None if IS_WINDOWS else self.project_dir,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', **POPEN_FLAGS)
-                for line in self.current_proc.stdout: self.after(0, self._log, line.rstrip())
+                for line in self.current_proc.stdout:
+                    self.after(0, self._log_and_track_progress, line.rstrip())
                 self.current_proc.wait(); rc = self.current_proc.returncode; self.current_proc = None
                 if rc == 0:
+                    success = True
                     self.after(0, self._set_step, 'ready', 'ok')
                     self.after(0, self.progress.set_value, 1.0)
                     self.after(0, self._log, "Finalizado OK", 'ok')
                     self.after(0, self.status_var.set, f"{name} completado")
                     self.after(0, self._mark_variant, name, 'ok')
-                    self.after(100, self._ask_pnp, name)
+                    if not on_done:
+                        self.after(100, self._ask_pnp, name)
                 elif rc in (-9, 137):
                     self.after(0, self._log, "Cancelado.", 'warn')
                     self.after(0, self._set_step, 'ready', 'ok')
@@ -1096,12 +1169,63 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
             finally:
                 self.after(0, self.btn_cancel.set_state, False)
                 self.after(0, self.progress.set_value, 0)
+                if on_done:
+                    self.after(0, on_done, name, success)
         threading.Thread(target=run, daemon=True).start()
+
+    def _log_and_track_progress(self, line):
+        self._log(line)
+        # KiBot outputs "- 'Name' (type) [dir]" for each output it processes
+        if line.startswith("- '") and self._output_total > 0:
+            self._output_count += 1
+            pct = self._output_count / self._output_total
+            self.progress.set_value(min(pct, 0.95))
 
     def _cancel_process(self):
         if self.current_proc:
-            try: self.current_proc.kill(); self._log("Cancelando...", 'warn')
-            except: pass
+            try:
+                if IS_WINDOWS:
+                    # taskkill /T kills the entire process tree (wsl.exe + child kibot)
+                    subprocess.run(['taskkill', '/F', '/T', '/PID', str(self.current_proc.pid)],
+                                   timeout=5, **POPEN_FLAGS)
+                else:
+                    self.current_proc.kill()
+                self._log("Cancelando...", 'warn')
+            except Exception:
+                try: self.current_proc.kill()
+                except Exception: pass
+
+    def _run_all_variants(self):
+        if self.kicad10_detected:
+            messagebox.showwarning("KiCad 10", "Primero convierta los archivos."); return
+        self._run_queue = list(self.variants)
+        self._run_all_total = len(self._run_queue)
+        self._run_all_ok = 0
+        self._log(f"\n{'='*50}", 'dim')
+        self._log(f"Ejecutando todas las variantes ({self._run_all_total})...", 'info')
+        self.btn_run_all.set_state(False)
+        self._run_next_in_queue()
+
+    def _run_next_in_queue(self):
+        if not self._run_queue:
+            self._log(f"\nTodas completadas: {self._run_all_ok}/{self._run_all_total}", 'ok')
+            self.status_var.set(f"Completadas: {self._run_all_ok}/{self._run_all_total}")
+            self.btn_run_all.set_state(True)
+            return
+        var = self._run_queue.pop(0)
+        self._run_variant(var, on_done=self._on_queue_variant_done)
+
+    def _on_queue_variant_done(self, name, success):
+        if success:
+            self._run_all_ok += 1
+        remaining = len(self._run_queue)
+        self.status_var.set(f"Cola: {self._run_all_total - remaining}/{self._run_all_total}")
+        if remaining > 0:
+            self.after(200, self._run_next_in_queue)
+        else:
+            self._log(f"\nTodas completadas: {self._run_all_ok}/{self._run_all_total}", 'ok')
+            self.status_var.set(f"Completadas: {self._run_all_ok}/{self._run_all_total}")
+            self.btn_run_all.set_state(True)
 
     # ── NEW FEATURES ──
 
@@ -1142,6 +1266,30 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
         idx = self.hist_list.size() - 1
         self.hist_list.itemconfig(idx, fg=XP['ok'] if state == 'ok' else XP['err'])
         self.hist_list.see(idx)
+        self._hist_variants.append(name)
+
+    def _on_hist_dblclick(self, event):
+        sel = self.hist_list.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if idx >= len(self._hist_variants):
+            return
+        vname = self._hist_variants[idx]
+        # Search for output folder containing this variant name
+        for entry in os.scandir(self.project_dir):
+            if entry.is_dir() and vname in entry.name:
+                folder = entry.path
+                if IS_WINDOWS:
+                    os.startfile(folder)
+                else:
+                    subprocess.Popen(['xdg-open', folder])
+                return
+        # Fallback: open project dir
+        if IS_WINDOWS:
+            os.startfile(self.project_dir)
+        else:
+            subprocess.Popen(['xdg-open', self.project_dir])
 
     def _open_output_folder(self):
         folder = self.project_dir
@@ -1170,14 +1318,55 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
     def _ask_pnp(self, variant_name):
         if not HAS_OPENPYXL:
             return
-        answer = messagebox.askyesno(
-            "Pick & Place",
-            f"Variante '{variant_name}' generada correctamente.\n\n"
-            "Desea crear los archivos PnP para\n"
-            "Charmhigh CHM-551?",
-            icon='question')
-        if answer:
+        win = tk.Toplevel(self)
+        win.title("Pick & Place")
+        win.geometry("420x200")
+        win.configure(bg=XP['bg'])
+        win.resizable(False, False)
+        win.transient(self)
+        win.grab_set()
+
+        # XP title bar
+        t = tk.Frame(win, bg=XP['title_bg'], height=28)
+        t.pack(fill='x'); t.pack_propagate(False)
+        tk.Label(t, text="  Pick & Place - CHM-551", fg='white', bg=XP['title_bg'],
+                 font=("Tahoma", 10, "bold")).pack(side='left')
+
+        body = tk.Frame(win, bg=XP['panel_bg'])
+        body.pack(fill='both', expand=True, padx=8, pady=8)
+
+        # Icon + message
+        msg_frame = tk.Frame(body, bg=XP['panel_bg'])
+        msg_frame.pack(fill='x', pady=(8, 12))
+        tk.Label(msg_frame, text="[?]", bg=XP['panel_bg'], fg=XP['info'],
+                 font=("Tahoma", 20, "bold")).pack(side='left', padx=(12, 8))
+        msg_text = tk.Frame(msg_frame, bg=XP['panel_bg'])
+        msg_text.pack(side='left', fill='x', expand=True)
+        tk.Label(msg_text, text=f"Variante '{variant_name}' generada correctamente.",
+                 bg=XP['panel_bg'], fg=XP['text'], font=("Tahoma", 9, "bold"),
+                 anchor='w').pack(fill='x')
+        tk.Label(msg_text, text="Desea crear los archivos PnP para\nCharmhigh CHM-551?",
+                 bg=XP['panel_bg'], fg=XP['text'], font=("Tahoma", 9),
+                 anchor='w', justify='left').pack(fill='x', pady=(4,0))
+
+        # Buttons
+        btn_frame = tk.Frame(body, bg=XP['panel_bg'])
+        btn_frame.pack(pady=(0, 4))
+
+        def on_yes():
+            win.destroy()
             self._run_pnp(variant_name)
+        def on_no():
+            win.destroy()
+
+        XPButton(btn_frame, text="Si, generar", command=on_yes, width=120, height=28).pack(side='left', padx=6)
+        XPButton(btn_frame, text="No, finalizar", command=on_no, width=120, height=28).pack(side='left', padx=6)
+
+        # Center on parent
+        win.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() - win.winfo_width()) // 2
+        y = self.winfo_y() + (self.winfo_height() - win.winfo_height()) // 2
+        win.geometry(f"+{x}+{y}")
 
     def _run_pnp(self, variant_name):
         self._log(f"\n{'='*50}", 'dim')
