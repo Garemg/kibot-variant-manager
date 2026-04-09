@@ -1,3 +1,4 @@
 pyyaml
 tkinterdnd2
 Pillow
+openpyxl

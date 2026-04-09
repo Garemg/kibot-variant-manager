@@ -5,7 +5,7 @@ KiBot Variant Manager v4 — Windows XP style, red corporate theme
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
-import yaml, subprocess, threading, os, re, shutil, glob, json, sys, datetime
+import yaml, subprocess, threading, os, re, shutil, glob, json, sys, datetime, csv
 from pathlib import Path
 from PIL import Image, ImageTk
 
@@ -14,6 +14,12 @@ try:
     HAS_DND = True
 except ImportError:
     HAS_DND = False
+
+try:
+    from openpyxl import load_workbook
+    HAS_OPENPYXL = True
+except ImportError:
+    HAS_OPENPYXL = False
 
 IS_WINDOWS = sys.platform == 'win32'
 sys.setrecursionlimit(10000)
@@ -418,6 +424,57 @@ def validate_yaml(data):
         elif 'name' not in x: errs.append(f"Variante {i+1}: falta 'name'")
     return len(errs)==0, errs
 
+def generate_pnp_chm551(pos_dir, bom_xlsx, log_cb):
+    """Generate PnP CSVs for Charmhigh CHM-551 from position CSVs and BOM xlsx."""
+    wb = load_workbook(bom_xlsx, data_only=True)
+    ws = wb.active
+    ref_to_torsa = {}
+    for row in ws.iter_rows(min_row=2):
+        references = row[1].value  # col B
+        torsa = row[6].value       # col G
+        if references and torsa:
+            for ref in str(references).replace(",", " ").split():
+                ref_to_torsa[ref.strip()] = str(torsa).strip()
+    wb.close()
+    log_cb(f"  BOM: {len(ref_to_torsa)} referencias cargadas")
+
+    created = []
+    for csv_in in sorted(glob.glob(os.path.join(pos_dir, '*_pos.csv'))):
+        bn = os.path.basename(csv_in)
+        if '_PnP_CHM551' in bn:
+            continue
+        is_bottom = '_bottom_pos.csv' in bn
+        out_name = bn.replace('_pos.csv', '_pos_PnP_CHM551.csv')
+        csv_out = os.path.join(pos_dir, out_name)
+
+        rows = []
+        fieldnames = None
+        with open(csv_in, newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames
+            for r in reader:
+                ref = r.get('Ref', '').strip()
+                torsa = ref_to_torsa.get(ref)
+                if torsa:
+                    r['Val'] = torsa
+                if is_bottom and 'PosX' in r:
+                    try:
+                        val = float(r['PosX'])
+                        if val > 0:
+                            r['PosX'] = f"{-val:.4f}"
+                    except ValueError:
+                        pass
+                rows.append(r)
+
+        with open(csv_out, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+        side = "BOTTOM (PosX negado)" if is_bottom else "TOP"
+        log_cb(f"  {out_name}  [{side}]")
+        created.append(csv_out)
+    return created
+
 # ══════════════════════════════════════════════
 #  XP-STYLE WIDGETS
 # ══════════════════════════════════════════════
@@ -715,7 +772,7 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         if HAS_DND:
             inner.drop_target_register(DND_FILES)
-            inner.dnd_bind('<<DropEnter>>', lambda e: inner.configure(bg=XP['selection_light']))
+            inner.dnd_bind('<<DropEnter>>', lambda e: inner.configure(bg=XP['white']))
             inner.dnd_bind('<<DropLeave>>', lambda e: inner.configure(bg=XP['white']))
             inner.dnd_bind('<<Drop>>', self._on_drop)
             tk.Label(center, text="[Drag & Drop activo]", font=("Tahoma", 8, "bold"),
@@ -1022,6 +1079,7 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
                     self.after(0, self._log, "Finalizado OK", 'ok')
                     self.after(0, self.status_var.set, f"{name} completado")
                     self.after(0, self._mark_variant, name, 'ok')
+                    self.after(100, self._ask_pnp, name)
                 elif rc in (-9, 137):
                     self.after(0, self._log, "Cancelado.", 'warn')
                     self.after(0, self._set_step, 'ready', 'ok')
@@ -1106,6 +1164,61 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(content)
             self.status_var.set(f"Log exportado: {os.path.basename(path)}")
+
+    # ── PnP CHM-551 ──
+
+    def _ask_pnp(self, variant_name):
+        if not HAS_OPENPYXL:
+            return
+        answer = messagebox.askyesno(
+            "Pick & Place",
+            f"Variante '{variant_name}' generada correctamente.\n\n"
+            "Desea crear los archivos PnP para\n"
+            "Charmhigh CHM-551?",
+            icon='question')
+        if answer:
+            self._run_pnp(variant_name)
+
+    def _run_pnp(self, variant_name):
+        self._log(f"\n{'='*50}", 'dim')
+        self._log("Generando PnP para CHM-551...", 'info')
+        self.status_var.set("Generando PnP CHM-551...")
+
+        # Find Position folder: search for recently modified dirs matching this variant
+        pos_dir = None
+        bom_xlsx = None
+        for root, dirs, files in os.walk(self.project_dir):
+            # Skip backup folders
+            if '_v10' in root:
+                continue
+            bn = os.path.basename(root)
+            if bn == 'Position':
+                csvs = [f for f in files if f.endswith('_pos.csv') and '_PnP_CHM551' not in f]
+                if csvs:
+                    # Check sibling BoM folder for xlsx
+                    parent = os.path.dirname(root)
+                    bom_dir = os.path.join(parent, 'BoM')
+                    xlsxs = glob.glob(os.path.join(bom_dir, '*.xlsx')) if os.path.isdir(bom_dir) else []
+                    if xlsxs:
+                        pos_dir = root
+                        bom_xlsx = xlsxs[0]
+                        break
+
+        if not pos_dir or not bom_xlsx:
+            self._log("No se encontraron carpetas Position/BoM con datos", 'err')
+            self.status_var.set("PnP: carpetas no encontradas")
+            return
+
+        self._log(f"  Position: {pos_dir}", 'dim')
+        self._log(f"  BOM: {os.path.basename(bom_xlsx)}", 'dim')
+
+        try:
+            created = generate_pnp_chm551(pos_dir, bom_xlsx, lambda m: self._log(m, 'ok'))
+            self._log(f"PnP CHM-551: {len(created)} archivo(s) generados", 'ok')
+            self.status_var.set(f"PnP CHM-551: {len(created)} archivo(s)")
+        except Exception as e:
+            self._log(f"Error generando PnP: {e}", 'err')
+            self.status_var.set("PnP: error")
 
 if __name__ == '__main__':
     app = KiBotGUI()
