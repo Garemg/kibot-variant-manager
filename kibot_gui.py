@@ -7,6 +7,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
 import yaml, subprocess, threading, os, re, shutil, glob, json, sys, datetime
 from pathlib import Path
+from PIL import Image, ImageTk
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -17,6 +18,7 @@ except ImportError:
 IS_WINDOWS = sys.platform == 'win32'
 sys.setrecursionlimit(10000)
 CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".kibot_manager.json")
+ASSETS_DIR = os.path.join(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__))), 'assets')
 POPEN_FLAGS = {}
 if IS_WINDOWS:
     POPEN_FLAGS['creationflags'] = 0x08000000
@@ -486,6 +488,24 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.minsize(860, 560)
         self.configure(bg=XP['bg'])
 
+        # ── load images ──
+        self._images = {}
+        try:
+            logo = Image.open(os.path.join(ASSETS_DIR, 'Logo_Torsa.png'))
+            logo = logo.resize((120, int(120 * logo.height / logo.width)), Image.LANCZOS)
+            self._images['logo'] = ImageTk.PhotoImage(logo)
+        except Exception:
+            self._images['logo'] = None
+        try:
+            icn = Image.open(os.path.join(ASSETS_DIR, 'icono.png'))
+            self._images['icon_drop'] = ImageTk.PhotoImage(icn.resize((80, 80), Image.LANCZOS))
+            ico16 = ImageTk.PhotoImage(icn.resize((16, 16), Image.LANCZOS))
+            ico32 = ImageTk.PhotoImage(icn.resize((32, 32), Image.LANCZOS))
+            ico48 = ImageTk.PhotoImage(icn.resize((48, 48), Image.LANCZOS))
+            self.iconphoto(True, ico48, ico32, ico16)
+        except Exception:
+            self._images['icon_drop'] = None
+
         self.variants = []
         self.yaml_path = None
         self.project_dir = None
@@ -511,6 +531,8 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
                  bg=XP['title_bg'], font=("Tahoma", 12, "bold")).place(x=7, y=7)
         tk.Label(title, text=" KiBot Variant Manager", fg=XP['title_fg'],
                  bg=XP['title_bg'], font=("Tahoma", 12, "bold")).place(x=6, y=6)
+        if self._images.get('logo'):
+            tk.Label(title, image=self._images['logo'], bg=XP['title_bg']).pack(side='right', padx=8)
 
         # ═══ TOOLBAR ═══
         toolbar = tk.Frame(self, bg=XP['toolbar_bg'], height=38)
@@ -680,9 +702,12 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
         center = tk.Frame(inner, bg=XP['white'])
         center.place(relx=0.5, rely=0.4, anchor='center')
 
-        # folder icon style
-        tk.Label(center, text="[  ]", font=("Tahoma", 48, "bold"),
-                 bg=XP['white'], fg='#FFD700').pack()
+        # app icon
+        if self._images.get('icon_drop'):
+            tk.Label(center, image=self._images['icon_drop'], bg=XP['white']).pack()
+        else:
+            tk.Label(center, text="[  ]", font=("Tahoma", 48, "bold"),
+                     bg=XP['white'], fg='#FFD700').pack()
         tk.Label(center, text="Arrastre su archivo YAML aqui",
                  font=("Tahoma", 13, "bold"), bg=XP['white'], fg=XP['text']).pack(pady=(8,2))
         tk.Label(center, text="o use el boton 'Cargar YAML' de la barra de herramientas",
