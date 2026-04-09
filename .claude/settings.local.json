@@ -8,7 +8,9 @@
       "Bash(rm -f strip_test.py load_test.py diff_test.py load_test2.py bsearch*.py find_all_failures.py)",
       "Bash(ls *.py)",
       "Bash(python3 -c \"import sys; print\\(sys.getrecursionlimit\\(\\)\\)\")",
-      "Bash(python -c \"import sys; print\\(sys.getrecursionlimit\\(\\)\\)\")"
+      "Bash(python -c \"import sys; print\\(sys.getrecursionlimit\\(\\)\\)\")",
+      "Bash(pyinstaller --onefile --windowed --name \"KiBot Variant Manager\" --add-data \"assets;assets\" --collect-all tkinterdnd2 --hidden-import PIL kibot_gui.py)",
+      "Bash(ie4uinit.exe -show)"
     ]
   }
 }
