@@ -13,9 +13,7 @@ for multiple variants of the same design from a visual interface.
 - YAML configuration loading with drag & drop
 - Variant button panel with direct KiBot execution
 - Automatic KiCad version detection (7/8/9/10)
-- Automatic KiCad 10 → 9 conversion for KiBot compatibility
-- Original file backup in separate folder
-- .kicad_pro generation for converted projects
+- Direct execution with KiBot 1.9.0 (including KiCad 10 projects)
 - System requirements validation (WSL, KiCad, KiBot)
 - Execution log in integrated terminal
 - Windows XP style interface with corporate theme
@@ -24,8 +22,8 @@ for multiple variants of the same design from a visual interface.
 
 - Windows 10/11 with WSL (Ubuntu)
 - KiCad installed in WSL
-- KiBot 1.8+ installed in WSL
-- Python 3.10+ (development only)
+- KiBot 1.9.0+ installed in WSL
+- Python 3.10+ (development/build only)
 
 ## Installation
 
