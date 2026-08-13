@@ -29,6 +29,7 @@ POPEN_FLAGS = {}
 if IS_WINDOWS:
     POPEN_FLAGS['creationflags'] = 0x08000000
 KIBOT_MIN_VERSION = (1, 9, 0)
+KICAD_MIN_MAJOR   = 10
 
 # ══════════════════════════════════════════════
 #  XP STYLE CONSTANTS
@@ -88,6 +89,10 @@ def is_kibot_version_compatible(version_output):
         return False
     return parsed >= KIBOT_MIN_VERSION
 
+def parse_kicad_major(version_str):
+    m = re.search(r'(\d+)', version_str or '')
+    return int(m.group(1)) if m else 0
+
 def detect_kicad_version(filepath):
     try:
         with open(filepath, 'r', encoding='utf-8', errors='replace') as f: head = f.read(2000)
@@ -133,9 +138,14 @@ def check_requirements():
         except:
             results.append(("KiBot", False, "No encontrado"))
         try:
-            subprocess.check_output(['python3','-c','import pcbnew'], text=True, stderr=subprocess.STDOUT)
-            results.append(("KiCad", True, "OK"))
-        except: results.append(("KiCad", False, "No encontrado"))
+            kv = subprocess.check_output(
+                ['python3','-c','import pcbnew; print(pcbnew.GetBuildVersion())'],
+                text=True, stderr=subprocess.STDOUT).strip()
+            ok = parse_kicad_major(kv) >= KICAD_MIN_MAJOR
+            detail = kv if ok else f"{kv} (requiere KiCad {KICAD_MIN_MAJOR})"
+            results.append(("KiCad", ok, detail))
+        except:
+            results.append(("KiCad", False, "No instalado"))
         return results
     try:
         subprocess.check_output(['wsl','echo','ok'], text=True, **POPEN_FLAGS)
@@ -143,7 +153,9 @@ def check_requirements():
     except:
         results.append(("WSL", False, "No instalado")); return results
     try:
-        v = subprocess.check_output(['wsl','bash','-lc','kibot --version'], text=True, encoding='utf-8', **POPEN_FLAGS).strip()
+        v = subprocess.check_output(
+            ['wsl','bash','-lc','PATH="$HOME/.local/bin:$PATH" kibot --version'],
+            text=True, encoding='utf-8', **POPEN_FLAGS).strip()
         ok = is_kibot_version_compatible(v)
         min_v = '.'.join(str(x) for x in KIBOT_MIN_VERSION)
         detail = v if ok else f"{v} (requiere >= {min_v})"
@@ -151,9 +163,14 @@ def check_requirements():
     except:
         results.append(("KiBot", False, "No instalado en WSL"))
     try:
-        subprocess.check_output(['wsl','bash','-lc','python3 -c "import pcbnew"'], text=True, encoding='utf-8', **POPEN_FLAGS)
-        results.append(("KiCad", True, "OK"))
-    except: results.append(("KiCad", False, "No instalado en WSL"))
+        kv = subprocess.check_output(
+            ['wsl','bash','-lc','python3 -c "import pcbnew; print(pcbnew.GetBuildVersion())"'],
+            text=True, encoding='utf-8', **POPEN_FLAGS).strip()
+        ok = parse_kicad_major(kv) >= KICAD_MIN_MAJOR
+        detail = kv if ok else f"{kv} (requiere KiCad {KICAD_MIN_MAJOR})"
+        results.append(("KiCad", ok, detail))
+    except:
+        results.append(("KiCad", False, "No instalado en WSL"))
     return results
 
 def load_config():
@@ -211,13 +228,22 @@ def generate_pnp_chm551(pos_dir, bom_xlsx, log_cb):
                 torsa = ref_to_torsa.get(ref)
                 if torsa:
                     r['Val'] = torsa
-                if is_bottom and 'PosX' in r:
-                    try:
-                        val = float(r['PosX'])
-                        if val > 0:
-                            r['PosX'] = f"{-val:.4f}"
-                    except ValueError:
-                        pass
+                if is_bottom:
+                    if 'PosX' in r:
+                        try:
+                            val = float(r['PosX'])
+                            if val > 0:
+                                r['PosX'] = f"{-val:.4f}"
+                        except ValueError:
+                            pass
+                    if 'Rot' in r:
+                        try:
+                            a = (180.0 - float(r['Rot'])) % 360.0
+                            if a > 180.0:
+                                a -= 360.0
+                            r['Rot'] = f"{a:.4f}"
+                        except ValueError:
+                            pass
                 rows.append(r)
 
         with open(csv_out, 'w', newline='', encoding='utf-8') as f:
@@ -228,6 +254,44 @@ def generate_pnp_chm551(pos_dir, bom_xlsx, log_cb):
         log_cb(f"  {out_name}  [{side}]")
         created.append(csv_out)
     return created
+
+def generate_odoo_bom_csv(bom_xlsx_path, code, log_cb):
+    """Generate Odoo BOM import CSV from KiBot BOM xlsx."""
+    wb = load_workbook(bom_xlsx_path, data_only=True)
+    ws = wb.active
+    product_tmpl_id = str(ws['D3'].value or '').strip()
+    lines = []
+    for row_num in range(9, ws.max_row + 1):
+        product_id = ws.cell(row=row_num, column=7).value  # Column G (Torsa#)
+        product_qty = ws.cell(row=row_num, column=3).value  # Column C (Quantity per PCB)
+        if not product_id:
+            break
+        try:
+            qty_f = float(product_qty)
+            qty = int(qty_f) if qty_f == int(qty_f) else qty_f
+        except (TypeError, ValueError):
+            qty = product_qty
+        lines.append((str(product_id).strip(), qty))
+    wb.close()
+    log_cb(f"  Producto: {product_tmpl_id}")
+    log_cb(f"  Componentes: {len(lines)}")
+    if not lines:
+        log_cb("  Sin componentes en el BOM")
+        return None
+    bn = os.path.basename(bom_xlsx_path)
+    csv_name = bn.replace('-bom.xlsx', '-odoo_bom.csv') if '-bom.xlsx' in bn else os.path.splitext(bn)[0] + '_odoo.csv'
+    csv_path = os.path.join(os.path.dirname(bom_xlsx_path), csv_name)
+    with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
+        w = csv.writer(f)
+        w.writerow(['product_tmpl_id', 'code', 'type',
+                    'bom_line_ids/product_id', 'bom_line_ids/product_qty', 'bom_line_ids/product_uom_id'])
+        w.writerow([product_tmpl_id, code, 'Fabricar este producto',
+                    lines[0][0], lines[0][1], 'Unidades'])
+        for pid, qty in lines[1:]:
+            w.writerow(['', '', '', pid, qty, 'Unidades'])
+    log_cb(f"  Guardado: {csv_name}")
+    return csv_path
+
 
 # ══════════════════════════════════════════════
 #  XP-STYLE WIDGETS
@@ -735,7 +799,7 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         if IS_WINDOWS:
             wy = wsl_path(self.yaml_path); wd = wsl_path(self.project_dir)
-            full = f'cd "{wd}" && kibot -c "{wy}" -g variant={name}'
+            full = f'cd "{wd}" && PATH="$HOME/.local/bin:$PATH" kibot -c "{wy}" -g variant={name}'
             cmd = ['wsl', 'bash', '-lc', full]
         else:
             cmd = ['kibot', '-c', self.yaml_path, '-g', f'variant={name}']
@@ -959,8 +1023,10 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
         def on_yes():
             win.destroy()
             self._run_pnp(variant_name)
+            self.after(150, self._ask_odoo_bom, variant_name)
         def on_no():
             win.destroy()
+            self.after(150, self._ask_odoo_bom, variant_name)
 
         XPButton(btn_frame, text="Si, generar", command=on_yes, width=120, height=28).pack(side='left', padx=6)
         XPButton(btn_frame, text="No, finalizar", command=on_no, width=120, height=28).pack(side='left', padx=6)
@@ -1008,6 +1074,93 @@ class KiBotGUI(TkinterDnD.Tk if HAS_DND else tk.Tk):
         except Exception as e:
             self._log(f"Error generando PnP: {e}", 'err')
             self.status_var.set("PnP: error")
+
+    # ── ODOO BOM CSV ──
+
+    def _ask_odoo_bom(self, variant_name):
+        if not HAS_OPENPYXL:
+            return
+        bom_xlsx = None
+        for f in glob.glob(os.path.join(self.project_dir, '**', '*-bom.xlsx'), recursive=True):
+            if variant_name in f:
+                bom_xlsx = f
+                break
+        if not bom_xlsx:
+            return
+
+        win = tk.Toplevel(self)
+        win.title("Exportar BOM para Odoo")
+        win.geometry("460x210")
+        win.configure(bg=XP['bg'])
+        win.resizable(False, False)
+        win.transient(self)
+        win.grab_set()
+
+        t = tk.Frame(win, bg=XP['title_bg'], height=28)
+        t.pack(fill='x'); t.pack_propagate(False)
+        tk.Label(t, text="  Exportar BOM para Odoo", fg='white', bg=XP['title_bg'],
+                 font=("Tahoma", 10, "bold")).pack(side='left')
+
+        body = tk.Frame(win, bg=XP['panel_bg'])
+        body.pack(fill='both', expand=True, padx=8, pady=8)
+
+        info = tk.Frame(body, bg=XP['panel_bg'])
+        info.pack(fill='x', pady=(4, 8))
+        tk.Label(info, text="[?]", bg=XP['panel_bg'], fg=XP['info'],
+                 font=("Tahoma", 18, "bold")).pack(side='left', padx=(8, 10))
+        msg = tk.Frame(info, bg=XP['panel_bg'])
+        msg.pack(side='left', fill='x', expand=True)
+        tk.Label(msg, text=f"BOM generado para variante '{variant_name}'.",
+                 bg=XP['panel_bg'], fg=XP['text'], font=("Tahoma", 9, "bold"), anchor='w').pack(fill='x')
+        tk.Label(msg, text=os.path.basename(bom_xlsx),
+                 bg=XP['panel_bg'], fg=XP['text3'], font=("Tahoma", 8), anchor='w').pack(fill='x')
+
+        code_frame = tk.Frame(body, bg=XP['panel_bg'])
+        code_frame.pack(fill='x', pady=(0, 12))
+        tk.Label(code_frame, text="Codigo (code):", bg=XP['panel_bg'], fg=XP['text'],
+                 font=("Tahoma", 9, "bold"), width=14, anchor='w').pack(side='left')
+        code_var = tk.StringVar()
+        code_entry = tk.Entry(code_frame, textvariable=code_var, font=("Tahoma", 9),
+                              bg=XP['field_bg'], relief='sunken', bd=2)
+        code_entry.pack(side='left', fill='x', expand=True)
+        code_entry.focus_set()
+
+        btn_frame = tk.Frame(body, bg=XP['panel_bg'])
+        btn_frame.pack()
+
+        def on_generate():
+            code = code_var.get().strip()
+            win.destroy()
+            self._run_odoo_bom(variant_name, bom_xlsx, code)
+
+        def on_cancel():
+            win.destroy()
+
+        XPButton(btn_frame, text="Generar CSV", command=on_generate, width=120, height=28).pack(side='left', padx=6)
+        XPButton(btn_frame, text="Cancelar", command=on_cancel, width=100, height=28).pack(side='left', padx=6)
+        win.bind('<Return>', lambda e: on_generate())
+        win.bind('<Escape>', lambda e: on_cancel())
+        win.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() - win.winfo_width()) // 2
+        y = self.winfo_y() + (self.winfo_height() - win.winfo_height()) // 2
+        win.geometry(f"+{x}+{y}")
+
+    def _run_odoo_bom(self, variant_name, bom_xlsx, code):
+        self._log(f"\n{'='*50}", 'dim')
+        self._log("Generando BOM para Odoo...", 'info')
+        self.status_var.set("Generando BOM Odoo...")
+        try:
+            csv_path = generate_odoo_bom_csv(bom_xlsx, code, lambda m: self._log(m, 'dim'))
+            if csv_path:
+                self._log(f"BOM Odoo: {os.path.basename(csv_path)}", 'ok')
+                self.status_var.set(f"BOM Odoo generado: {os.path.basename(csv_path)}")
+            else:
+                self._log("BOM Odoo: sin componentes en el BOM", 'warn')
+                self.status_var.set("BOM Odoo: sin datos")
+        except Exception as e:
+            self._log(f"Error generando BOM Odoo: {e}", 'err')
+            self.status_var.set("BOM Odoo: error")
+
 
 if __name__ == '__main__':
     app = KiBotGUI()
